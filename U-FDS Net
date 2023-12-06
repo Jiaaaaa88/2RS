@@ -1,0 +1,647 @@
+"""
+TODO:network structure
+python 3.8
+torch 1.8.0+cu111
+UTF-8
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import warnings
+warnings.filterwarnings("ignore")
+
+
+class N_conv(nn.Module):
+    """
+    (convolution => [BN] => ReLU) * n
+    """
+
+    def __init__(self, in_channels, out_channels,
+                 bn=True, relu=True, n=2, k_size=3, padding=1):
+        super(N_conv, self).__init__()
+        self.n = n
+        if bn and relu:
+            for i in range(1, n + 1):
+                conv = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+                    nn.BatchNorm2d(out_channels),
+                    nn.ReLU(inplace=True), )
+                setattr(self, 'conv%d' % i, conv)
+                in_channels = out_channels
+        elif not bn and relu:
+            for i in range(1, n + 1):
+                conv = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+                    nn.ReLU(inplace=True), )
+                setattr(self, 'conv%d' % i, conv)
+                in_channels = out_channels
+        elif bn and not relu:
+            for i in range(1, n + 1):
+                conv = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+                    nn.BatchNorm2d(out_channels),)
+                setattr(self, 'conv%d' % i, conv)
+                in_channels = out_channels
+        else:
+            print('error!')
+            quit()
+
+    def forward(self, inputs):
+        x = inputs
+        for i in range(1, self.n + 1):
+            conv = getattr(self, 'conv%d' % i)
+            x = conv(x)
+        return x
+
+
+class Down(nn.Module):
+    """
+    maxpool => (convolution => [BN] => ReLU）*n
+    """
+
+    def __init__(self, in_channels, out_channels,
+                 down_bn=True, down_n=2):
+        super(Down, self).__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            N_conv(in_channels, out_channels, bn=down_bn, n=down_n))
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class Cat_conv(nn.Module):
+    """
+    cat => (convolution => [BN] => ReLU）*n
+    """
+
+    def __init__(self, in_channels, out_channels, cat_n,
+                 bn=True, up_n=2, k_size=3, padding=1):
+        super(Cat_conv, self).__init__()
+        self.cat_conv = nn.Sequential(
+            nn.Conv2d(cat_n * out_channels, in_channels, kernel_size=k_size, padding=padding, stride=1),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            N_conv(in_channels, in_channels, bn=bn, n=up_n - 1))
+
+    def forward(self, x):
+        return self.cat_conv(x)
+
+
+class Down_conv(nn.Module):
+    """
+    maxpool => convolution => BN
+    """
+
+    def __init__(self, in_channels, out_channels, down_scale,
+                 k_size=3, padding=1):
+        super(Down_conv, self).__init__()
+        self.down_conv = nn.Sequential(
+            nn.MaxPool2d(down_scale),
+            nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+            nn.BatchNorm2d(out_channels))
+
+    def forward(self, x):
+        return self.down_conv(x)
+
+
+class Up_conv(nn.Module):
+    """
+    up => convolution => BN
+    """
+
+    def __init__(self, in_channels, out_channels, up_scale,
+                 kernel_size=4, stride=2, padding=1, up_method=5, k_size=3):
+        super(Up_conv, self).__init__()
+        methods = ['bilinear', 'nearest', 'linear', 'bicubic', 'trilinear']
+        if up_method == 5:
+            if up_scale == 2:
+                self.up_conv = nn.Sequential(
+                    nn.ConvTranspose2d(in_channels, out_channels,
+                                       kernel_size=kernel_size, stride=stride, padding=padding),
+                    nn.BatchNorm2d(out_channels))
+            elif up_scale == 4:
+                self.up_conv = nn.Sequential(
+                    nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.ConvTranspose2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.BatchNorm2d(out_channels))
+            elif up_scale == 8:
+                self.up_conv = nn.Sequential(
+                    nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.ConvTranspose2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.ConvTranspose2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.BatchNorm2d(out_channels))
+            elif up_scale == 16:
+                self.up_conv = nn.Sequential(
+                    nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.ConvTranspose2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.ConvTranspose2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.ConvTranspose2d(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                       padding=padding),
+                    nn.BatchNorm2d(out_channels))
+
+        else:
+            self.up_conv = nn.Sequential(
+                nn.Upsample(scale_factor=up_scale, mode=methods[up_method], align_corners=True),
+                nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=1, stride=1),
+                nn.BatchNorm2d(out_channels))
+
+    def forward(self, x):
+        return self.up_conv(x)
+
+
+class Up_cat_conv(nn.Module):
+    """
+    up => cat => convolution
+    """
+
+    def __init__(self, in_channels, out_channels,
+                 kernel_size=4, stride=2, padding=1, up_method=5):
+        super(Up_cat_conv, self).__init__()
+        methods = ['bilinear', 'nearest', 'linear', 'bicubic', 'trilinear']
+        if up_method == 5:
+            self.up_cat_conv = nn.ConvTranspose2d(out_channels, out_channels,
+                                                  kernel_size=kernel_size, stride=stride, padding=padding)
+        else:
+            self.up_cat_conv = nn.Upsample(scale_factor=2, mode=methods[up_method], align_corners=True)
+
+        self.conv1x1 = nn.Conv2d(in_channels * 2, out_channels, kernel_size=1, stride=1)
+
+    def forward(self, x1, x2):
+        x1 = self.up_cat_conv(x1)
+        x = torch.cat([x1, x2], dim=1)
+        return self.conv1x1(x)
+
+
+class U_fds_net(nn.Module):
+    """
+    Args:
+        n_channels: Number of input image channels (Default:3)
+        n_classes: Number of classes (Default:1)
+        side_fp: Side feature map deep supervision methods. Use 'none', 'step', 'skip' (Default:none)
+        style: Network Connection Type. Use 'dense', 'en', 'de' (Default:dense)
+        width: Network width (Default:64)
+        n, down_n, up_n: Network depth (Default:2)
+        up_method: Upsampling types. Use 0->bilinear; 1->nearest; 2->linear;
+                                         3->bicubic; 4->trilinear; 5->Transposed Conv (Default:Transposed Conv)
+        is_batchnorm: If BN (Default:True)
+    """
+
+    def __init__(self, n_channels=3, n_classes=1, side_fp='none', style='dense',
+                 width=64, n=2, down_n=2, up_n=2, up_method=5, is_batchnorm=True):
+        super(U_fds_net, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.side_fp = side_fp
+        self.style = style
+        self.size = width
+        self.n = n
+        self.down_n = down_n
+        self.up_n = up_n
+        self.up_method = up_method
+        self.bn = is_batchnorm
+        num = [self.size, self.size * 2, self.size * 4, self.size * 8, self.size * 16]
+
+        self.X11 = N_conv(self.n_channels, num[0], bn=self.bn, n=self.n)
+        self.X21 = Down(num[0], num[1], down_bn=self.bn, down_n=self.down_n)
+        self.X31 = Down(num[1], num[2], down_bn=self.bn, down_n=self.down_n)
+        self.X41 = Down(num[2], num[3], down_bn=self.bn, down_n=self.down_n)
+        self.X51 = Down(num[3], num[4], down_bn=self.bn, down_n=self.down_n)
+
+        if self.style == 'en':
+            self.X11convX12 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X11convX13 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X11convX14 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X11convX15 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X21convX22 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+            self.X21convX23 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+            self.X21convX24 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X31convX32 = N_conv(num[2], num[0], bn=self.bn, relu=False, n=1)
+            self.X31convX33 = N_conv(num[2], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X41convX42 = N_conv(num[3], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X11downX22 = Down_conv(num[0], num[0], down_scale=2)
+            self.X11downX23 = Down_conv(num[0], num[0], down_scale=2)
+            self.X11downX24 = Down_conv(num[0], num[0], down_scale=2)
+            self.X11downX32 = Down_conv(num[0], num[0], down_scale=4)
+            self.X11downX33 = Down_conv(num[0], num[0], down_scale=4)
+            self.X11downX42 = Down_conv(num[0], num[0], down_scale=8)
+
+            self.X21downX32 = Down_conv(num[1], num[0], down_scale=2)
+            self.X21downX33 = Down_conv(num[1], num[0], down_scale=2)
+            self.X21downX42 = Down_conv(num[1], num[0], down_scale=4)
+
+            self.X31downX42 = Down_conv(num[2], num[0], down_scale=2)
+
+            self.X21upX12 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X22upX13 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X23upX14 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X24upX15 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+
+            self.X31upX13 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X32upX14 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X33upX15 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X31upX22 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+            self.X32upX23 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+            self.X33upX24 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+
+            self.X41upX14 = Up_conv(num[3], num[0], up_scale=8, up_method=self.up_method)
+            self.X42upX15 = Up_conv(num[3], num[0], up_scale=8, up_method=self.up_method)
+            self.X41upX23 = Up_conv(num[3], num[0], up_scale=4, up_method=self.up_method)
+            self.X42upX24 = Up_conv(num[3], num[0], up_scale=4, up_method=self.up_method)
+            self.X41upX32 = Up_conv(num[3], num[0], up_scale=2, up_method=self.up_method)
+            self.X42upX33 = Up_conv(num[3], num[0], up_scale=2, up_method=self.up_method)
+
+            self.X51upX15 = Up_conv(num[4], num[0], up_scale=16, up_method=self.up_method)
+            self.X51upX24 = Up_conv(num[4], num[0], up_scale=8, up_method=self.up_method)
+            self.X51upX33 = Up_conv(num[4], num[0], up_scale=4, up_method=self.up_method)
+            self.X51upX42 = Up_conv(num[4], num[0], up_scale=2, up_method=self.up_method)
+
+        elif self.style == 'dense':
+            self.X11convX12 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X11X12convX13 = N_conv(num[0] * 2, num[0], bn=self.bn, relu=False, n=1)
+            self.X11X12X13convX14 = N_conv(num[0] * 3, num[0], bn=self.bn, relu=False, n=1)
+            self.X11X12X13X14convX15 = N_conv(num[0] * 4, num[0], bn=self.bn, relu=False, n=1)
+
+            self.X21convX22 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+            self.X21X22convX23 = N_conv(num[1] * 2, num[0], bn=self.bn, relu=False, n=1)
+            self.X21X22X23convX24 = N_conv(num[1] * 3, num[0], bn=self.bn, relu=False, n=1)
+
+            self.X31convX32 = N_conv(num[2], num[0], bn=self.bn, relu=False, n=1)
+            self.X31X32convX33 = N_conv(num[2] * 2, num[0], bn=self.bn, relu=False, n=1)
+
+            self.X41convX42 = N_conv(num[3], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X11X12downX22 = Down_conv(num[0] * 2, num[0], down_scale=2)
+            self.X11X12X13downX23 = Down_conv(num[0] * 3, num[0], down_scale=2)
+            self.X11X12X13X14downX24 = Down_conv(num[0] * 4, num[0], down_scale=2)
+            self.X11X12X13downX32 = Down_conv(num[0] * 3, num[0], down_scale=4)
+            self.X11X12X13X14downX33 = Down_conv(num[0] * 4, num[0], down_scale=4)
+            self.X11X12X13X14downX42 = Down_conv(num[0] * 4, num[0], down_scale=8)
+
+            self.X21X22downX32 = Down_conv(num[1] * 2, num[0], down_scale=2)
+            self.X21X22X23downX33 = Down_conv(num[1] * 3, num[0], down_scale=2)
+            self.X21X22X23downX42 = Down_conv(num[1] * 3, num[0], down_scale=4)
+
+            self.X31X32downX42 = Down_conv(num[2] * 2, num[0], down_scale=2)
+
+            self.X21upX12 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X21X22upX13 = Up_conv(num[1] * 2, num[0], up_scale=2, up_method=self.up_method)
+            self.X21X22X23upX14 = Up_conv(num[1] * 3, num[0], up_scale=2, up_method=self.up_method)
+            self.X21X22X23X24upX15 = Up_conv(num[1] * 4, num[0], up_scale=2, up_method=self.up_method)
+
+            self.X31upX13 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X31X32upX14 = Up_conv(num[2] * 2, num[0], up_scale=4, up_method=self.up_method)
+            self.X31X32X33upX15 = Up_conv(num[2] * 3, num[0], up_scale=4, up_method=self.up_method)
+            self.X31upX22 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+            self.X31X32upX23 = Up_conv(num[2] * 2, num[0], up_scale=2, up_method=self.up_method)
+            self.X31X32X33upX24 = Up_conv(num[2] * 3, num[0], up_scale=2, up_method=self.up_method)
+
+            self.X41upX14 = Up_conv(num[3], num[0], up_scale=8, up_method=self.up_method)
+            self.X41X42upX15 = Up_conv(num[3] * 2, num[0], up_scale=8, up_method=self.up_method)
+            self.X41upX23 = Up_conv(num[3], num[0], up_scale=4, up_method=self.up_method)
+            self.X41X42upX24 = Up_conv(num[3] * 2, num[0], up_scale=4, up_method=self.up_method)
+            self.X41upX32 = Up_conv(num[3], num[0], up_scale=2, up_method=self.up_method)
+            self.X41X42upX33 = Up_conv(num[3] * 2, num[0], up_scale=2, up_method=self.up_method)
+
+            self.X51upX15 = Up_conv(num[4], num[0], up_scale=16, up_method=self.up_method)
+            self.X51upX24 = Up_conv(num[4], num[0], up_scale=8, up_method=self.up_method)
+            self.X51upX33 = Up_conv(num[4], num[0], up_scale=4, up_method=self.up_method)
+            self.X51upX42 = Up_conv(num[4], num[0], up_scale=2, up_method=self.up_method)
+
+        elif self.style == 'de':
+            self.X11convX12 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X12convX13 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X13convX14 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+            self.X14convX15 = N_conv(num[0], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X21convX22 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+            self.X22convX23 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+            self.X23convX24 = N_conv(num[1], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X31convX32 = N_conv(num[2], num[0], bn=self.bn, relu=False, n=1)
+            self.X32convX33 = N_conv(num[2], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X41convX42 = N_conv(num[3], num[0], bn=self.bn, relu=False, n=1)
+
+            self.X12downX22 = Down_conv(num[0], num[0], down_scale=2)
+            self.X13downX23 = Down_conv(num[0], num[0], down_scale=2)
+            self.X14downX24 = Down_conv(num[0], num[0], down_scale=2)
+            self.X13downX32 = Down_conv(num[0], num[0], down_scale=4)
+            self.X14downX33 = Down_conv(num[0], num[0], down_scale=4)
+            self.X14downX42 = Down_conv(num[0], num[0], down_scale=8)
+
+            self.X22downX32 = Down_conv(num[1], num[0], down_scale=2)
+            self.X23downX33 = Down_conv(num[1], num[0], down_scale=2)
+            self.X23downX42 = Down_conv(num[1], num[0], down_scale=4)
+
+            self.X32downX42 = Down_conv(num[2], num[0], down_scale=2)
+
+            self.X21upX12 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X22upX13 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X23upX14 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+            self.X24upX15 = Up_conv(num[1], num[0], up_scale=2, up_method=self.up_method)
+
+            self.X31upX13 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X32upX14 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X33upX15 = Up_conv(num[2], num[0], up_scale=4, up_method=self.up_method)
+            self.X31upX22 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+            self.X32upX23 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+            self.X33upX24 = Up_conv(num[2], num[0], up_scale=2, up_method=self.up_method)
+
+            self.X41upX14 = Up_conv(num[3], num[0], up_scale=8, up_method=self.up_method)
+            self.X42upX15 = Up_conv(num[3], num[0], up_scale=8, up_method=self.up_method)
+            self.X41upX23 = Up_conv(num[3], num[0], up_scale=4, up_method=self.up_method)
+            self.X42upX24 = Up_conv(num[3], num[0], up_scale=4, up_method=self.up_method)
+            self.X41upX32 = Up_conv(num[3], num[0], up_scale=2, up_method=self.up_method)
+            self.X42upX33 = Up_conv(num[3], num[0], up_scale=2, up_method=self.up_method)
+
+            self.X51upX15 = Up_conv(num[4], num[0], up_scale=16, up_method=self.up_method)
+            self.X51upX24 = Up_conv(num[4], num[0], up_scale=8, up_method=self.up_method)
+            self.X51upX33 = Up_conv(num[4], num[0], up_scale=4, up_method=self.up_method)
+            self.X51upX42 = Up_conv(num[4], num[0], up_scale=2, up_method=self.up_method)
+
+        self.X12 = Cat_conv(num[0], num[0], 2, bn=self.bn, up_n=self.up_n)
+        self.X13 = Cat_conv(num[0], num[0], 3, bn=self.bn, up_n=self.up_n)
+        self.X14 = Cat_conv(num[0], num[0], 4, bn=self.bn, up_n=self.up_n)
+        self.X15 = Cat_conv(num[0], num[0], 5, bn=self.bn, up_n=self.up_n)
+
+        self.X22 = Cat_conv(num[1], num[0], 3, bn=self.bn, up_n=self.up_n)
+        self.X23 = Cat_conv(num[1], num[0], 4, bn=self.bn, up_n=self.up_n)
+        self.X24 = Cat_conv(num[1], num[0], 5, bn=self.bn, up_n=self.up_n)
+
+        self.X32 = Cat_conv(num[2], num[0], 4, bn=self.bn, up_n=self.up_n)
+        self.X33 = Cat_conv(num[2], num[0], 5, bn=self.bn, up_n=self.up_n)
+
+        self.X42 = Cat_conv(num[3], num[0], 5, bn=self.bn, up_n=self.up_n)
+
+        self.TopX12 = nn.Conv2d(num[0], self.n_classes, kernel_size=1)
+        self.TopX13 = nn.Conv2d(num[0], self.n_classes, kernel_size=1)
+        self.TopX14 = nn.Conv2d(num[0], self.n_classes, kernel_size=1)
+        self.TopX15 = nn.Conv2d(num[0], self.n_classes, kernel_size=1)
+
+        if self.side_fp == 'none':
+            self.Aw_X12 = nn.Parameter(torch.ones([1]) * 0.25, requires_grad=True)
+            self.Aw_X13 = nn.Parameter(torch.ones([1]) * 0.25, requires_grad=True)
+            self.Aw_X14 = nn.Parameter(torch.ones([1]) * 0.25, requires_grad=True)
+            self.Aw_X15 = nn.Parameter(torch.ones([1]) * 0.25, requires_grad=True)
+
+        elif self.side_fp == 'skip':
+            self.X24fpX24 = Up_conv(num[1], self.n_classes, up_scale=2, up_method=self.up_method)
+            self.X33fpX33 = Up_conv(num[2], self.n_classes, up_scale=4, up_method=self.up_method)
+            self.X42fpX42 = Up_conv(num[3], self.n_classes, up_scale=8, up_method=self.up_method)
+            self.X51fpX51 = Up_conv(num[4], self.n_classes, up_scale=16, up_method=self.up_method)
+
+            self.Aw_X12 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X13 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X14 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X15 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X24 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X33 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X42 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+            self.Aw_X51 = nn.Parameter(torch.ones([1]) * 0.125, requires_grad=True)
+
+        elif self.side_fp == 'step':
+            self.X24fpX24 = nn.Conv2d(num[1], self.n_classes, kernel_size=1)
+            self.X33fpX33 = nn.Conv2d(num[2], self.n_classes, kernel_size=1)
+            self.X42fpX42 = nn.Conv2d(num[3], self.n_classes, kernel_size=1)
+            self.X51fpX51 = nn.Conv2d(num[4], self.n_classes, kernel_size=1)
+
+            self.X51toX42 = Up_cat_conv(self.n_classes, self.n_classes, up_method=self.up_method)
+            self.X4_toX3_ = Up_cat_conv(self.n_classes, self.n_classes, up_method=self.up_method)
+            self.X3_toX2_ = Up_cat_conv(self.n_classes, self.n_classes, up_method=self.up_method)
+            self.X2_toX1_ = Up_cat_conv(self.n_classes, self.n_classes, up_method=self.up_method)
+
+            self.Aw_X12 = nn.Parameter(torch.ones([1]) * 0.2, requires_grad=True)
+            self.Aw_X13 = nn.Parameter(torch.ones([1]) * 0.2, requires_grad=True)
+            self.Aw_X14 = nn.Parameter(torch.ones([1]) * 0.2, requires_grad=True)
+            self.Aw_X15 = nn.Parameter(torch.ones([1]) * 0.2, requires_grad=True)
+            self.Aw_side = nn.Parameter(torch.ones([1]) * 0.2, requires_grad=True)
+
+    def forward(self, x):
+        global x12, x13, x14, x15, x24, x33, x42, fp, fp24, fp33, fp42, fp51, fpside
+        x11 = self.X11(x)
+        x21 = self.X21(x11)
+        x31 = self.X31(x21)
+        x41 = self.X41(x31)
+        x51 = self.X51(x41)
+
+        if self.style == 'en':
+            x12 = self.X12(torch.cat([self.X21upX12(x21),
+                                      self.X11convX12(x11)], dim=1))
+
+            x22 = self.X22(torch.cat([self.X31upX22(x31),
+                                      self.X21convX22(x21),
+                                      self.X11downX22(x11)], dim=1))
+
+            x13 = self.X13(torch.cat([self.X31upX13(x31),
+                                      self.X22upX13(x22),
+                                      self.X11convX13(x11)], dim=1))
+
+            x32 = self.X32(torch.cat([self.X41upX32(x41),
+                                      self.X31convX32(x31),
+                                      self.X21downX32(x21),
+                                      self.X11downX32(x11)], dim=1))
+
+            x23 = self.X23(torch.cat([self.X41upX23(x41),
+                                      self.X32upX23(x32),
+                                      self.X21convX23(x21),
+                                      self.X11downX23(x11)], dim=1))
+
+            x14 = self.X14(torch.cat([self.X41upX14(x41),
+                                      self.X32upX14(x32),
+                                      self.X23upX14(x23),
+                                      self.X11convX14(x11)], dim=1))
+
+            x42 = self.X42(torch.cat([self.X51upX42(x51),
+                                      self.X41convX42(x41),
+                                      self.X31downX42(x31),
+                                      self.X21downX42(x21),
+                                      self.X11downX42(x11)], dim=1))
+
+            x33 = self.X33(torch.cat([self.X51upX33(x51),
+                                      self.X42upX33(x42),
+                                      self.X31convX33(x31),
+                                      self.X21downX33(x21),
+                                      self.X11downX33(x11)], dim=1))
+
+            x24 = self.X24(torch.cat([self.X51upX24(x51),
+                                      self.X42upX24(x42),
+                                      self.X33upX24(x33),
+                                      self.X21convX24(x21),
+                                      self.X11downX24(x11)], dim=1))
+
+            x15 = self.X15(torch.cat([self.X51upX15(x51),
+                                      self.X42upX15(x42),
+                                      self.X33upX15(x33),
+                                      self.X24upX15(x24),
+                                      self.X11convX15(x11)], dim=1))
+
+        elif self.style == 'dense':
+            x12 = self.X12(torch.cat([self.X21upX12(x21),
+                                      self.X11convX12(x11)], dim=1))
+
+            x22 = self.X22(torch.cat([self.X31upX22(x31),
+                                      self.X21convX22(x21),
+                                      self.X11X12downX22(torch.cat([x11, x12], dim=1))], dim=1))
+
+            x13 = self.X13(torch.cat([self.X31upX13(x31),
+                                      self.X21X22upX13(torch.cat([x21, x22], dim=1)),
+                                      self.X11X12convX13(torch.cat([x11, x12], dim=1))], dim=1))
+
+            x32 = self.X32(torch.cat([self.X41upX32(x41),
+                                      self.X31convX32(x31),
+                                      self.X21X22downX32(torch.cat([x21, x22], dim=1)),
+                                      self.X11X12X13downX32(torch.cat([x11, x12, x13], dim=1))], dim=1))
+
+            x23 = self.X23(torch.cat([self.X41upX23(x41),
+                                      self.X31X32upX23(torch.cat([x31, x32], dim=1)),
+                                      self.X21X22convX23(torch.cat([x21, x22], dim=1)),
+                                      self.X11X12X13downX23(torch.cat([x11, x12, x13], dim=1))], dim=1))
+
+            x14 = self.X14(torch.cat([self.X41upX14(x41),
+                                      self.X31X32upX14(torch.cat([x31, x32], dim=1)),
+                                      self.X21X22X23upX14(torch.cat([x21, x22, x23], dim=1)),
+                                      self.X11X12X13convX14(torch.cat([x11, x12, x13], dim=1))], dim=1))
+
+            x42 = self.X42(torch.cat([self.X51upX42(x51),
+                                      self.X41convX42(x41),
+                                      self.X31X32downX42(torch.cat([x31, x32], dim=1)),
+                                      self.X21X22X23downX42(torch.cat([x21, x22, x23], dim=1)),
+                                      self.X11X12X13X14downX42(torch.cat([x11, x12, x13, x14], dim=1))], dim=1))
+
+            x33 = self.X33(torch.cat([self.X51upX33(x51),
+                                      self.X41X42upX33(torch.cat([x41, x42], dim=1)),
+                                      self.X31X32convX33(torch.cat([x31, x32], dim=1)),
+                                      self.X21X22X23downX33(torch.cat([x21, x22, x23], dim=1)),
+                                      self.X11X12X13X14downX33(torch.cat([x11, x12, x13, x14], dim=1))], dim=1))
+
+            x24 = self.X24(torch.cat([self.X51upX24(x51),
+                                      self.X41X42upX24(torch.cat([x41, x42], dim=1)),
+                                      self.X31X32X33upX24(torch.cat([x31, x32, x33], dim=1)),
+                                      self.X21X22X23convX24(torch.cat([x21, x22, x23], dim=1)),
+                                      self.X11X12X13X14downX24(torch.cat([x11, x12, x13, x14], dim=1))], dim=1))
+
+            x15 = self.X15(torch.cat([self.X51upX15(x51),
+                                      self.X41X42upX15(torch.cat([x41, x42], dim=1)),
+                                      self.X31X32X33upX15(torch.cat([x31, x32, x33], dim=1)),
+                                      self.X21X22X23X24upX15(torch.cat([x21, x22, x23, x24], dim=1)),
+                                      self.X11X12X13X14convX15(torch.cat([x11, x12, x13, x14], dim=1))], dim=1))
+
+        elif self.style == 'de':
+            x12 = self.X12(torch.cat([self.X21upX12(x21),
+                                      self.X11convX12(x11)], dim=1))
+
+            x22 = self.X22(torch.cat([self.X31upX22(x31),
+                                      self.X21convX22(x21),
+                                      self.X12downX22(x12)], dim=1))
+
+            x13 = self.X13(torch.cat([self.X31upX13(x31),
+                                      self.X22upX13(x22),
+                                      self.X12convX13(x12)], dim=1))
+
+            x32 = self.X32(torch.cat([self.X41upX32(x41),
+                                      self.X31convX32(x31),
+                                      self.X22downX32(x22),
+                                      self.X13downX32(x13)], dim=1))
+
+            x23 = self.X23(torch.cat([self.X41upX23(x41),
+                                      self.X32upX23(x32),
+                                      self.X22convX23(x22),
+                                      self.X13downX23(x13)], dim=1))
+
+            x14 = self.X14(torch.cat([self.X41upX14(x41),
+                                      self.X32upX14(x32),
+                                      self.X23upX14(x23),
+                                      self.X13convX14(x13)], dim=1))
+
+            x42 = self.X42(torch.cat([self.X51upX42(x51),
+                                      self.X41convX42(x41),
+                                      self.X32downX42(x32),
+                                      self.X23downX42(x23),
+                                      self.X14downX42(x14)], dim=1))
+
+            x33 = self.X33(torch.cat([self.X51upX33(x51),
+                                      self.X42upX33(x42),
+                                      self.X32convX33(x32),
+                                      self.X23downX33(x23),
+                                      self.X14downX33(x14)], dim=1))
+
+            x24 = self.X24(torch.cat([self.X51upX24(x51),
+                                      self.X42upX24(x42),
+                                      self.X33upX24(x33),
+                                      self.X23convX24(x23),
+                                      self.X14downX24(x14)], dim=1))
+
+            x15 = self.X15(torch.cat([self.X51upX15(x51),
+                                      self.X42upX15(x42),
+                                      self.X33upX15(x33),
+                                      self.X24upX15(x24),
+                                      self.X14convX15(x14)], dim=1))
+
+        else:
+            print("Error! please check the 'style' arguments")
+            quit()
+
+        if self.side_fp == 'none':
+            weights = F.softmax(torch.cat([self.Aw_X12, self.Aw_X13, self.Aw_X14, self.Aw_X15]))
+            fp12 = weights[0] * self.TopX12(x12)
+            fp13 = weights[1] * self.TopX12(x13)
+            fp14 = weights[2] * self.TopX12(x14)
+            fp15 = weights[3] * self.TopX12(x15)
+
+            fp = fp12 + fp13 + fp14 + fp15
+
+        elif self.side_fp == 'skip':
+            weights = F.softmax(torch.cat([self.Aw_X12, self.Aw_X13, self.Aw_X14, self.Aw_X15,
+                                           self.Aw_X24, self.Aw_X33, self.Aw_X42, self.Aw_X51]))
+            fp12 = weights[0] * self.TopX12(x12)
+            fp13 = weights[1] * self.TopX12(x13)
+            fp14 = weights[2] * self.TopX12(x14)
+            fp15 = weights[3] * self.TopX12(x15)
+            fp24 = weights[4] * self.X24fpX24(x24)
+            fp33 = weights[5] * self.X33fpX33(x33)
+            fp42 = weights[6] * self.X42fpX42(x42)
+            fp51 = weights[7] * self.X51fpX51(x51)
+
+            fp = fp12 + fp13 + fp14 + fp15 + fp24 + fp33 + fp42 + fp51
+
+        elif self.side_fp == 'step':
+            fp4_ = self.X51toX42(self.X51fpX51(x51), self.X42fpX42(x42))
+            fp3_ = self.X4_toX3_(fp4_, self.X33fpX33(x33))
+            fp2_ = self.X3_toX2_(fp3_, self.X24fpX24(x24))
+            fpside1_ = self.X2_toX1_(fp2_, self.TopX15(x15))
+
+            weights = F.softmax(torch.cat([self.Aw_X12, self.Aw_X13, self.Aw_X14, self.Aw_X15, self.Aw_side]))
+            fp12 = weights[0] * self.TopX12(x12)
+            fp13 = weights[1] * self.TopX12(x13)
+            fp14 = weights[2] * self.TopX12(x14)
+            fp15 = weights[3] * self.TopX12(x15)
+            fpside = weights[4] * fpside1_
+
+            fp = fp12 + fp13 + fp14 + fp15 + fpside
+
+        else:
+            print("Error! please check the 'side_fp' arguments")
+            quit()
+
+        return fp
+
+
+if __name__ == "__main__":
+    # test model
+    img = torch.randn([1, 3, 256, 256]).cuda()
+    net = U_fds_net().cuda()
+    pred = net(img)
+    print(pred.shape)
