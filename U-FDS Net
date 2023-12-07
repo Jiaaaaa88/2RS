@@ -17,13 +17,13 @@ class N_conv(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels,
-                 bn=True, relu=True, n=2, k_size=3, padding=1):
+                 bn=True, relu=True, n=2, k_size=3, padding=1, group=4):
         super(N_conv, self).__init__()
         self.n = n
         if bn and relu:
             for i in range(1, n + 1):
                 conv = nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1, groups=group),
                     nn.BatchNorm2d(out_channels),
                     nn.ReLU(inplace=True), )
                 setattr(self, 'conv%d' % i, conv)
@@ -31,14 +31,14 @@ class N_conv(nn.Module):
         elif not bn and relu:
             for i in range(1, n + 1):
                 conv = nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1, groups=group),
                     nn.ReLU(inplace=True), )
                 setattr(self, 'conv%d' % i, conv)
                 in_channels = out_channels
         elif bn and not relu:
             for i in range(1, n + 1):
                 conv = nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1),
+                    nn.Conv2d(in_channels, out_channels, kernel_size=k_size, padding=padding, stride=1, groups=group),
                     nn.BatchNorm2d(out_channels),)
                 setattr(self, 'conv%d' % i, conv)
                 in_channels = out_channels
@@ -164,7 +164,7 @@ class Up_cat_conv(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels,
-                 kernel_size=4, stride=2, padding=1, up_method=5):
+                 kernel_size=2, stride=2, padding=1, up_method=5):
         super(Up_cat_conv, self).__init__()
         methods = ['bilinear', 'nearest', 'linear', 'bicubic', 'trilinear']
         if up_method == 5:
@@ -184,33 +184,39 @@ class Up_cat_conv(nn.Module):
 class U_fds_net(nn.Module):
     """
     Args:
-        n_channels: Number of input image channels (Default:3)
-        n_classes: Number of classes (Default:1)
+        in_channels: Number of input image channels
+        n_classes: Number of classes
         side_fp: Side feature map deep supervision methods. Use 'none', 'step', 'skip' (Default:none)
         style: Network Connection Type. Use 'dense', 'en', 'de' (Default:dense)
-        width: Network width (Default:64)
-        n, down_n, up_n: Network depth (Default:2)
-        up_method: Upsampling types. Use 0->bilinear; 1->nearest; 2->linear;
-                                         3->bicubic; 4->trilinear; 5->Transposed Conv (Default:Transposed Conv)
+        width: Network width
+        n, down_n, up_n: Network depth
+        up_method: Upsampling types. Use 0->bilinear; 1->nearest; 2->linear; 3->bicubic; 4->trilinear; 5->Transposed Conv.
+                                     Using '5' for faster speed, but more params
         is_batchnorm: If BN (Default:True)
     """
 
-    def __init__(self, n_channels=3, n_classes=1, side_fp='none', style='dense',
-                 width=64, n=2, down_n=2, up_n=2, up_method=5, is_batchnorm=True):
+    def __init__(self, in_channels=3, n_classes=1, side_fp='none', style='dense',
+                 width=48, n=2, down_n=2, up_n=2, up_method=5, is_batchnorm=True):
         super(U_fds_net, self).__init__()
-        self.n_channels = n_channels
+        self.in_channels = in_channels
         self.n_classes = n_classes
         self.side_fp = side_fp
         self.style = style
-        self.size = width
         self.n = n
         self.down_n = down_n
         self.up_n = up_n
         self.up_method = up_method
         self.bn = is_batchnorm
-        num = [self.size, self.size * 2, self.size * 4, self.size * 8, self.size * 16]
+        num = [width * 2 ** i for i in range(5)]
 
-        self.X11 = N_conv(self.n_channels, num[0], bn=self.bn, n=self.n)
+        self.X11 = nn.Sequential(
+            nn.Conv2d(in_channels, num[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(num[0]),
+            nn.ReLU(True),
+            nn.Conv2d(num[0], num[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(num[0]),
+            nn.ReLU(True),
+        )
         self.X21 = Down(num[0], num[1], down_bn=self.bn, down_n=self.down_n)
         self.X31 = Down(num[1], num[2], down_bn=self.bn, down_n=self.down_n)
         self.X41 = Down(num[2], num[3], down_bn=self.bn, down_n=self.down_n)
@@ -643,5 +649,9 @@ if __name__ == "__main__":
     # test model
     img = torch.randn([1, 3, 256, 256]).cuda()
     net = U_fds_net().cuda()
-    pred = net(img)
-    print(pred.shape)
+    import time
+    start = time.time()
+    for _ in range(20):
+        pred = net(img)
+    end = time.time()
+    print(pred.shape, (end-start) / 20)
